@@ -14,6 +14,7 @@ import TestOpsConfig from './testOps/testOpsConfig.js'
 import type { Capabilities, Services, Options } from '@wdio/types'
 
 import { startPercy, stopPercy, getBestPlatformForPercySnapshot } from './Percy/PercyHelper.js'
+import { BrowserstackCLI } from './cli/index.js'
 
 import type { BrowserstackConfig, BrowserstackOptions, App, AppConfig, AppUploadResponse, UserConfig } from './types.js'
 import {
@@ -52,6 +53,7 @@ import PerformanceTester from './instrumentation/performance/performance-tester.
 import * as PERFORMANCE_SDK_EVENTS from './instrumentation/performance/constants.js'
 
 import { _fetch as fetch } from './fetchWrapper.js'
+import { CLIUtils } from './cli/cliUtils.js'
 
 type BrowserstackLocal = BrowserstackLocalLauncher.Local & {
     pid?: number
@@ -207,6 +209,16 @@ export default class BrowserstackLauncherService implements Services.ServiceInst
     async onPrepare (config: Options.Testrunner, capabilities: Capabilities.TestrunnerCapabilities | WebdriverIO.Capabilities) {
         // Send Funnel start request
         await sendStart(this.browserStackConfig)
+
+        try {
+            BStackLogger.debug('Is CLI running ' + BrowserstackCLI.getInstance().isRunning())
+            CLIUtils.setFrameworkDetail('selenium', 'selenium') // TODO: make this constant
+            const binconfig = CLIUtils.getBinConfig(this._config, capabilities, this._options)
+            await BrowserstackCLI.getInstance().bootstrap(binconfig)
+            BStackLogger.debug('Is CLI running ' + BrowserstackCLI.getInstance().isRunning())
+        } catch (err) {
+            BStackLogger.error(`Error while starting CLI ${err}`)
+        }
 
         // Setting up healing for those sessions where we don't add the service version capability as it indicates that the session is not being run on BrowserStack
         if (!shouldAddServiceVersion(this._config, this._options.testObservability, capabilities as Capabilities.BrowserStackCapabilities)) {
@@ -395,6 +407,7 @@ export default class BrowserstackLauncherService implements Services.ServiceInst
         BStackLogger.debug('Inside OnComplete hook..')
 
         BStackLogger.debug('Sending stop launch event')
+
         await stopBuildUpstream()
         if (process.env[BROWSERSTACK_OBSERVABILITY] && process.env[BROWSERSTACK_TESTHUB_UUID]) {
             console.log(`\nVisit https://observability.browserstack.com/builds/${process.env[BROWSERSTACK_TESTHUB_UUID]} to view build report, insights, and many more debugging information all at one place!\n`)
@@ -425,6 +438,12 @@ export default class BrowserstackLauncherService implements Services.ServiceInst
         if (this._options.percy) {
             await this.stopPercy()
             PercyLogger.clearLogger()
+        }
+
+        try {
+            await BrowserstackCLI.getInstance().stop()
+        } catch (err) {
+            BStackLogger.error(`Error while stoping CLI ${err}`)
         }
 
         if (!this.browserstackLocal || !this.browserstackLocal.isRunning()) {
