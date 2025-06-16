@@ -148,6 +148,13 @@ export class CLIUtils {
         const response = await this.requestToUpdateCLI(queryParams, config)
         if (nestedKeyValue(response, ['updated_cli_version'])) {
             logger.debug(`Need to update binary, current binary version: ${queryParams.cli_version}`)
+
+            const browserStackBinaryUrl = process.env.BROWSERSTACK_BINARY_URL || null
+            if (!isNullOrEmpty(browserStackBinaryUrl)) {
+                logger.debug(`Using BROWSERSTACK_BINARY_URL: ${browserStackBinaryUrl}`)
+                response.url = browserStackBinaryUrl
+            }
+
             const finalBinaryPath = await this.downloadLatestBinary(nestedKeyValue(response, ['url']), cliDir)
             PerformanceTester.end(PerformanceEvents.SDK_CLI_CHECK_UPDATE)
             return finalBinaryPath
@@ -411,12 +418,12 @@ export class CLIUtils {
 
         this.testFrameworkDetail = {
             name: testFramework,
-            version: { [testFramework]: 'latest' }, // TODO: update static value
+            version: { [testFramework]: CLIUtils.getSdkVersion() },
         }
 
         this.automationFrameworkDetail = {
             name: automationFramework,
-            version: 'latest', // TODO: update static value
+            version: { [automationFramework]: CLIUtils.getSdkVersion() },
         }
 
         process.env.BROWSERSTACK_AUTOMATION_FRAMEWORK_DETAIL = JSON.stringify(this.automationFrameworkDetail)
@@ -429,5 +436,15 @@ export class CLIUtils {
      */
     static getCurrentInstanceName() {
         return `${process.pid}:${threadId}`
+    }
+
+    /**
+     *
+     * @param {TestFrameworkState | AutomationFrameworkState} frameworkState
+     * @param {HookState} hookState
+     * @returns {string}
+     */
+    static getHookRegistryKey(frameworkState: State, hookState: State) {
+        return `${frameworkState}:${hookState}`
     }
 }
