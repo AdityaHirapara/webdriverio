@@ -52,7 +52,7 @@ export default class WebdriverIOModule extends BaseModule {
                 this.logger.warn('onBeforeDriverCreate: No capabilities provided')
                 return
             }
-            this.getBinDriverCapabilities(instance, capabilities)
+            await this.getBinDriverCapabilities(instance, capabilities)
         } catch (e){
             this.logger.error(`Error in onBeforeDriverCreate: ${util.format(e)}`)
         }
@@ -134,6 +134,15 @@ export default class WebdriverIOModule extends BaseModule {
                 }
                 this.logger.debug(`getBinDriverCapabilities: got hub url ${response.hubUrl}`)
             }
+            const capabilitiesStr = (response.capabilities as Buffer).toString('utf8')
+            const capabilitiesObj = JSON.parse(capabilitiesStr)
+            if (capabilitiesObj['bstack:options'] && 'buildTag' in capabilitiesObj['bstack:options']) {
+                delete capabilitiesObj['bstack:options'].buildTag
+            }
+            if ('browserstack.buildTag' in capabilitiesObj) {
+                delete capabilitiesObj['browserstack.buildTag']
+            }
+            AutomationFramework.setState(instance, AutomationFrameworkConstants.KEY_CAPABILITIES, capabilitiesObj)
         } catch (error) {
             this.logger.error(`getBinDriverCapabilities: Error getting capabilities: ${error}`)
         }
