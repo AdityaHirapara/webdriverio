@@ -1,27 +1,47 @@
 import path from 'node:path'
 import util, { promisify } from 'node:util'
-import grpc from '@grpc/grpc-js'
 
 import { CLIUtils } from './cliUtils.js'
-import { SDKClient } from '../proto/sdk.js'
 import {
+    SDKClient,
+    grpcCredentials,
+    grpcChannel,
+    StartBinSessionRequestConstructor,
+    StopBinSessionRequestConstructor,
+    ConnectBinSessionRequestConstructor,
+    TestFrameworkEventRequestConstructor,
+    TestSessionEventRequestConstructor,
+    ExecutionContextConstructor,
+    LogCreatedEventRequestConstructor,
+    // eslint-disable-next-line camelcase
+    LogCreatedEventRequest_LogEntryConstructor,
+    AutomationSessionConstructor,
+    DriverInitRequestConstructor,
+    FetchDriverExecuteParamsEventRequestConstructor
+} from '@browserstack/wdio-browserstack-service'
+
+// Type imports
+import type {
     StartBinSessionRequest,
-    StopBinSessionRequest,
     ConnectBinSessionRequest,
     TestFrameworkEventRequest,
     TestSessionEventRequest,
-    ExecutionContext,
     LogCreatedEventRequest,
-    // eslint-disable-next-line camelcase
-    LogCreatedEventRequest_LogEntry,
-    TestSessionEventRequest_AutomationSession as AutomationSession,
-    DriverInitRequest
-} from '../proto/sdk-messages.js'
+    LogCreatedEventRequest_LogEntry as LogEntry,
+    DriverInitRequest,
+    FetchDriverExecuteParamsEventRequest,
+    ConnectBinSessionResponse,
+    StartBinSessionResponse,
+    TestFrameworkEventResponse,
+    TestSessionEventResponse,
+    LogCreatedEventResponse,
+    DriverInitResponse,
+    FetchDriverExecuteParamsEventResponse
+} from '@browserstack/wdio-browserstack-service'
 
 import PerformanceTester from '../instrumentation/performance/performance-tester.js'
 import { EVENTS as PerformanceEvents } from '../instrumentation/performance/constants.js'
 import { BStackLogger } from './cliLogger.js'
-import type { ConnectBinSessionResponse, StartBinSessionResponse, TestFrameworkEventResponse, TestSessionEventResponse, LogCreatedEventResponse, DriverInitResponse } from 'src/proto/sdk-messages.js'
 
 /**
  * GrpcClient - Singleton class for managing gRPC client connections
@@ -34,7 +54,7 @@ export class GrpcClient {
 
     binSessionId: string|undefined
     listenAddress: string|undefined
-    channel: grpc.Channel|null = null
+    channel: any|null = null
     client: SDKClient | null = null
     logger = BStackLogger
 
@@ -90,9 +110,9 @@ export class GrpcClient {
         }
 
         // Create a channel
-        this.channel = new grpc.Channel(
+        this.channel = new grpcChannel(
             listenAddress,
-            grpc.credentials.createInsecure(),
+            grpcCredentials.createInsecure(),
             {
                 'grpc.keepalive_time_ms': 10000
             }
@@ -101,7 +121,8 @@ export class GrpcClient {
         // Create a client using the channel
         this.client = new SDKClient(
             listenAddress,
-            grpc.credentials.createInsecure()
+            grpcCredentials.createInsecure(),
+            {}
         )
 
         this.logger.info(`Connected to gRPC server at ${listenAddress}`)
@@ -125,7 +146,7 @@ export class GrpcClient {
             }
 
             // Create StartBinSessionRequest
-            const request = StartBinSessionRequest.create({
+            const request = StartBinSessionRequestConstructor.create({
                 binSessionId: this.binSessionId,
                 sdkLanguage: CLIUtils.getSdkLanguage(),
                 sdkVersion: packageVersion,
@@ -170,7 +191,7 @@ export class GrpcClient {
                 this.logger.info('No gRPC client not initialized.')
             }
 
-            const request = ConnectBinSessionRequest.create({
+            const request = ConnectBinSessionRequestConstructor.create({
                 binSessionId: this.binSessionId,
             })
 
@@ -211,7 +232,7 @@ export class GrpcClient {
                 this.logger.info('No gRPC client not initialized.')
             }
 
-            const request = StopBinSessionRequest.create({
+            const request = StopBinSessionRequestConstructor.create({
                 binSessionId: this.binSessionId
             })
 
@@ -234,7 +255,7 @@ export class GrpcClient {
         }
     }
 
-    async testSessionEvent(data: TestSessionEventRequest) {
+    async testSessionEvent(data: Omit<TestSessionEventRequest, 'binSessionId'>) {
         this.logger.info('Sending TestSessionEvent')
 
         try {
@@ -243,7 +264,7 @@ export class GrpcClient {
             }
             const { platformIndex, testFrameworkName, testFrameworkVersion, testFrameworkState, testHookState, testUuid, automationSessions, capabilities, executionContext } = data
             const sessions = automationSessions.map((automationSession) => {
-                return AutomationSession.create({
+                return AutomationSessionConstructor.create({
                     provider: automationSession.provider,
                     frameworkName: automationSession.frameworkName,
                     frameworkVersion: automationSession.frameworkVersion,
@@ -252,12 +273,12 @@ export class GrpcClient {
                     hubUrl: automationSession.hubUrl
                 })
             })
-            const executionContextBuilder = ExecutionContext.create({
+            const executionContextBuilder = ExecutionContextConstructor.create({
                 processId: executionContext?.processId,
                 threadId: executionContext?.threadId,
                 hash: executionContext?.hash
             })
-            const request = TestSessionEventRequest.create({
+            const request = TestSessionEventRequestConstructor.create({
                 binSessionId: this.binSessionId,
                 platformIndex: platformIndex,
                 testFrameworkName: testFrameworkName,
@@ -291,19 +312,19 @@ export class GrpcClient {
      * Send TestFrameworkEvent
      */
 
-    async testFrameworkEvent(data: TestFrameworkEventRequest) {
+    async testFrameworkEvent(data: Omit<TestFrameworkEventRequest, 'binSessionId'>) {
         this.logger.info('Sending TestFrameworkEvent')
         try {
             if (!this.client) {
                 this.logger.info('No gRPC client not initialized.')
             }
             const { platformIndex, testFrameworkName, testFrameworkVersion, testFrameworkState, testHookState, startedAt, endedAt, uuid, eventJson, executionContext } = data
-            const executionContextBuilder = ExecutionContext.create({
+            const executionContextBuilder = ExecutionContextConstructor.create({
                 processId: executionContext?.processId,
                 threadId: executionContext?.threadId,
                 hash: executionContext?.hash
             })
-            const request = TestFrameworkEventRequest.create({
+            const request = TestFrameworkEventRequestConstructor.create({
                 binSessionId: this.binSessionId,
                 platformIndex: platformIndex,
                 testFrameworkName: testFrameworkName,
@@ -338,14 +359,14 @@ export class GrpcClient {
      * Send driverInitEvent
      */
 
-    async driverInitEvent(data: DriverInitRequest) {
+    async driverInitEvent(data: Omit<DriverInitRequest, 'binSessionId'>) {
         this.logger.info('Sending driverInitEvent')
         try {
             if (!this.client) {
                 this.logger.info('No gRPC client not initialized.')
             }
             const { platformIndex, ref, userInputParams } = data
-            const request = DriverInitRequest.create({
+            const request = DriverInitRequestConstructor.create({
                 binSessionId: this.binSessionId,
                 platformIndex: platformIndex,
                 ref: ref,
@@ -368,23 +389,23 @@ export class GrpcClient {
         }
     }
 
-    async logCreatedEvent(data: LogCreatedEventRequest) {
+    async logCreatedEvent(data: Omit<LogCreatedEventRequest, 'binSessionId'>) {
         this.logger.info('Sending LogCreatedEvent')
         try {
             if (!this.client) {
                 this.logger.info('No gRPC client not initialized.')
             }
             const { platformIndex, logs, executionContext } = data
-            const executionContextBuilder = ExecutionContext.create({
+            const executionContextBuilder = ExecutionContextConstructor.create({
                 processId: executionContext?.processId,
                 threadId: executionContext?.threadId,
                 hash: executionContext?.hash
             })
             // eslint-disable-next-line camelcase
-            const logEntries: LogCreatedEventRequest_LogEntry[] = []
+            const logEntries: LogEntry[] = []
             for (const log of logs) {
                 // eslint-disable-next-line camelcase
-                const logEntry = LogCreatedEventRequest_LogEntry.create({
+                const logEntry = LogCreatedEventRequest_LogEntryConstructor.create({
                     testFrameworkName: log.testFrameworkName,
                     testFrameworkVersion: log.testFrameworkVersion,
                     testFrameworkState: log.testFrameworkState,
@@ -396,7 +417,7 @@ export class GrpcClient {
                 })
                 logEntries.push(logEntry)
             }
-            const request = LogCreatedEventRequest.create({
+            const request = LogCreatedEventRequestConstructor.create({
                 binSessionId: this.binSessionId,
                 platformIndex: platformIndex,
                 logs: logEntries,
@@ -416,6 +437,35 @@ export class GrpcClient {
             }
         } catch (error) {
             this.logger.error(`Error in LogCreatedEvent: ${util.format(error)}`)
+            throw error
+        }
+    }
+
+    async fetchDriverExecuteParamsEvent(data: Omit<FetchDriverExecuteParamsEventRequest, 'binSessionId'>) {
+        this.logger.info('Sending fetchDriverExecuteParamsEvent')
+        try {
+            if (!this.client) {
+                this.logger.info('No gRPC client not initialized.')
+            }
+            const { product, scriptName } = data
+            const request = FetchDriverExecuteParamsEventRequestConstructor.create({
+                binSessionId: this.binSessionId,
+                product: product,
+                scriptName: scriptName,
+            })
+
+            const fetchDriverExecuteParamsEventPromise = promisify(this.client!.fetchDriverExecuteParamsEvent).bind(this.client!) as (arg0: FetchDriverExecuteParamsEventRequest) => Promise<FetchDriverExecuteParamsEventResponse>
+            try {
+                const response = await fetchDriverExecuteParamsEventPromise(request)
+                this.logger.info('fetchDriverExecuteParamsEvent successful')
+                return response
+            } catch (error: unknown) {
+                const errorMessage = util.format(error)
+                this.logger.error(`fetchDriverExecuteParamsEvent error: ${errorMessage}`)
+                throw error
+            }
+        } catch (error) {
+            this.logger.error(`Error in fetchDriverExecuteParamsEvent: ${util.format(error)}`)
             throw error
         }
     }

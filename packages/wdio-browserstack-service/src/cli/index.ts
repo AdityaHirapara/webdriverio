@@ -10,7 +10,7 @@ import AutomateModule from './modules/automateModule.js'
 import TestHubModule from './modules/testHubModule.js'
 
 import type { ChildProcess } from 'node:child_process'
-import type { StartBinSessionResponse } from '../proto/sdk-messages.js'
+import type { StartBinSessionResponse } from '@browserstack/wdio-browserstack-service'
 import type BaseModule from './modules/baseModule.js'
 import { BROWSERSTACK_ACCESSIBILITY, BROWSERSTACK_OBSERVABILITY, BROWSERSTACK_TESTHUB_JWT, BROWSERSTACK_TESTHUB_UUID, CLI_STOP_TIMEOUT, TESTOPS_BUILD_COMPLETED_ENV, TESTOPS_SCREENSHOT_ENV } from '../constants.js'
 import type { Options } from '@wdio/types'
@@ -19,7 +19,7 @@ import WdioMochaTestFramework from './frameworks/wdioMochaTestFramework.js'
 import WdioAutomationFramework from './frameworks/wdioAutomationFramework.js'
 import WebdriverIOModule from './modules/webdriverIOModule.js'
 import AccessibilityModule from './modules/accessibilityModule.js'
-import { processAccessibilityResponse } from '../util.js'
+import { isTurboScale, processAccessibilityResponse, shouldAddServiceVersion } from '../util.js'
 import ObservabilityModule from './modules/observabilityModule.js'
 import type { BrowserstackConfig, BrowserstackOptions } from '../types.js'
 import PercyModule from './modules/percyModule.js'
@@ -76,10 +76,13 @@ export class BrowserstackCLI {
      * Initializes and starts the CLI based on environment settings
      * @returns {Promise<void>}
      */
-    async bootstrap(options: BrowserstackConfig & BrowserstackOptions, wdioConfig='',) {
+    async bootstrap(options: BrowserstackConfig & BrowserstackOptions, config?: Options.Testrunner, wdioConfig='') {
         PerformanceTester.start(PerformanceEvents.SDK_CLI_ON_BOOTSTRAP)
         BrowserstackCLI.enabled = true
         this.options = options
+        if (config) {
+            BrowserstackCLI.getInstance().setBrowserstackConfig(config)
+        }
         try {
             const binSessionId = process.env.BROWSERSTACK_CLI_BIN_SESSION_ID || null
 
@@ -155,8 +158,10 @@ export class BrowserstackCLI {
 
             if (startBinResponse.accessibility?.success){
                 process.env[BROWSERSTACK_ACCESSIBILITY] = 'true'
+                const options = this.options as BrowserstackConfig & BrowserstackOptions
+                const isNonBstackA11y = isTurboScale(options) || !shouldAddServiceVersion(this.browserstackConfig as Options.Testrunner, options.testObservability)
                 processAccessibilityResponse(startBinResponse, this.options as BrowserstackConfig & BrowserstackOptions)
-                this.modules[AccessibilityModule.MODULE_NAME] = new AccessibilityModule(startBinResponse.accessibility)
+                this.modules[AccessibilityModule.MODULE_NAME] = new AccessibilityModule(startBinResponse.accessibility, isNonBstackA11y)
             }
         }
         if (startBinResponse.percy?.success) {

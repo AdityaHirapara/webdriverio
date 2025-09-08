@@ -10,7 +10,9 @@ import {
     isBrowserstackSession,
     patchConsoleLogs,
     shouldAddServiceVersion,
-    isTrue
+    isTrue,
+    normalizeTestReportingConfig,
+    normalizeTestReportingEnvVariables
 } from './util.js'
 import type { BrowserstackConfig, BrowserstackOptions, MultiRemoteAction, SessionResponse, TurboScaleSessionResponse } from './types.js'
 import type { Pickle, Feature, ITestCaseHookParameter, CucumberHook } from './cucumber-types.js'
@@ -37,11 +39,15 @@ import { TestFrameworkConstants } from './cli/frameworks/constants/testFramework
 import { AutomationFrameworkConstants } from './cli/frameworks/constants/automationFrameworkConstants.js'
 import AutomationFramework from './cli/frameworks/automationFramework.js'
 import type AutomationFrameworkInstance from './cli/instances/automationFrameworkInstance.js'
+import util from 'node:util'
 import APIUtils from './cli/apiUtils.js'
+import { CLIUtils } from './cli/cliUtils.js'
 
 export default class BrowserstackService implements Services.ServiceInstance {
     private _sessionBaseUrl = `${APIUtils.BROWSERSTACK_AUTOMATE_API_URL}/automate/sessions`
     private _failReasons: string[] = []
+    private _hookFailReasons: string[] = []
+    private _pureTestFailReasons: string[] = []
     private _scenariosThatRan: string[] = []
     private _failureStatuses: string[] = ['failed', 'ambiguous', 'undefined', 'unknown']
     private _browser?: WebdriverIO.Browser
@@ -68,6 +74,10 @@ export default class BrowserstackService implements Services.ServiceInstance {
         this._options = { ...DEFAULT_OPTIONS, ...options }
         // added to maintain backward compatibility with webdriverIO v5
         this._config || (this._config = this._options)
+
+        normalizeTestReportingConfig(this._options)
+
+        normalizeTestReportingEnvVariables()
         this._observability = this._options.testObservability
         this._accessibility = this._options.accessibility
         this._percy = isTrue(process.env.BROWSERSTACK_PERCY)
@@ -123,9 +133,9 @@ export default class BrowserstackService implements Services.ServiceInstance {
         this._config.key = config.key
 
         try {
-            if (this._config.framework === 'mocha') {
+            if (CLIUtils.checkCLISupportedFrameworks(this._config.framework)) {
                 // Connect to Browserstack CLI from worker
-                await BrowserstackCLI.getInstance().bootstrap(this._options)
+                await BrowserstackCLI.getInstance().bootstrap(this._options, this._config)
 
                 // Get the nearest hub and update it in config
                 const hubUrl = BrowserstackCLI.getInstance().getConfig().hubUrl as string
@@ -135,10 +145,10 @@ export default class BrowserstackService implements Services.ServiceInstance {
             }
             if (BrowserstackCLI.getInstance().isRunning()) {
                 await BrowserstackCLI.getInstance().getAutomationFramework()!.trackEvent(AutomationFrameworkState.CREATE, HookState.PRE, { caps: capabilities })
+                const instance = AutomationFramework.getTrackedInstance() as AutomationFrameworkInstance
+                const caps = AutomationFramework.getState(instance, AutomationFrameworkConstants.KEY_CAPABILITIES)
+                Object.assign(capabilities, caps)
             }
-            const instance = AutomationFramework.getTrackedInstance() as AutomationFrameworkInstance
-            const caps = AutomationFramework.getState(instance, AutomationFrameworkConstants.KEY_CAPABILITIES)
-            Object.assign(capabilities, caps)
         } catch (err) {
             BStackLogger.error(`Error while connecting to Browserstack CLI: ${err}`)
         }
@@ -304,6 +314,16 @@ export default class BrowserstackService implements Services.ServiceInstance {
 
     @PerformanceTester.Measure(PERFORMANCE_SDK_EVENTS.EVENTS.SDK_HOOK, { hookType: 'afterHook' })
     async afterHook(test: Frameworks.Test | CucumberHook, context: unknown, result: Frameworks.TestResult) {
+        // Track hook failures separately
+        if (result && !result.passed) {
+            const hookError = (result.error && result.error.message) || 'Hook failed'
+            this._hookFailReasons.push(hookError)
+
+            // Still add to main failReasons for backward compatibility if ignoreHooksStatus is not enabled
+            if (!this._options.testObservabilityOptions?.ignoreHooksStatus) {
+                this._failReasons.push(hookError)
+            }
+        }
         await this._insightsHandler?.afterHook(test, result)
     }
 
@@ -311,7 +331,6 @@ export default class BrowserstackService implements Services.ServiceInstance {
     async beforeTest (test: Frameworks.Test) {
         this._currentTest = test
         let suiteTitle = this._suiteTitle
-        BStackLogger.debug(`This is my suitetitle ${suiteTitle}`)
 
         if (test.fullName) {
             // For Jasmine, `suite.title` is `Jasmine__TopLevel__Suite`.
@@ -343,7 +362,11 @@ export default class BrowserstackService implements Services.ServiceInstance {
         this._specsRan = true
         const { error, passed } = results
         if (!passed) {
-            this._failReasons.push((error && error.message) || 'Unknown Error')
+            const testError = (error && error.message) || 'Unknown Error'
+            this._failReasons.push(testError)
+
+            // Track this as a pure test failure (not hook-related)
+            this._pureTestFailReasons.push(testError)
         }
 
         if (BrowserstackCLI.getInstance().isRunning()) {
@@ -356,43 +379,107 @@ export default class BrowserstackService implements Services.ServiceInstance {
         await this._percyHandler?.afterTest()
     }
 
-    @PerformanceTester.Measure(PERFORMANCE_SDK_EVENTS.EVENTS.SDK_HOOK, { hookType: 'after' })
     async after (result: number) {
-        const { preferScenarioName, setSessionName, setSessionStatus } = this._options
-        // For Cucumber: Checks scenarios that ran (i.e. not skipped) on the session
-        // Only 1 Scenario ran and option enabled => Redefine session name to Scenario's name
-        if (preferScenarioName && this._scenariosThatRan.length === 1){
-            this._fullTitle = this._scenariosThatRan.pop()
-        }
+        PerformanceTester.start(PERFORMANCE_SDK_EVENTS.HOOK_EVENTS.AFTER)
 
-        await PerformanceTester.measureWrapper(PERFORMANCE_SDK_EVENTS.AUTOMATE_EVENTS.SESSION_STATUS, async () => {
-            if (setSessionStatus && !BrowserstackCLI.getInstance().isRunning()) {
-                BStackLogger.debug(`Setting session status to ${result === 0 ? 'passed' : 'failed'}`)
-                const hasReasons = this._failReasons.length > 0
-                await this._updateJob({
-                    status: result === 0 && this._specsRan ? 'passed' : 'failed',
-                    ...(setSessionName ? { name: this._fullTitle } : {}),
-                    ...(result === 0 && this._specsRan ?
-                        {} : hasReasons ? { reason: this._failReasons.join('\n') } : {})
-                })
+        try {
+            if (BrowserstackCLI.getInstance().isRunning()) {
+                await BrowserstackCLI.getInstance().getAutomationFramework()!.trackEvent(AutomationFrameworkState.EXECUTE, HookState.POST, {})
             }
-        })()
+            const { preferScenarioName, setSessionName, setSessionStatus } = this._options
+            // For Cucumber: Checks scenarios that ran (i.e. not skipped) on the session
+            // Only 1 Scenario ran and option enabled => Redefine session name to Scenario's name
+            if (preferScenarioName && this._scenariosThatRan.length === 1){
+                this._fullTitle = this._scenariosThatRan.pop()
+            }
 
-        await Listener.getInstance().onWorkerEnd()
-        if (!BrowserstackCLI.getInstance().isRunning()) {
-            await this._percyHandler?.teardown()
-        }
-        this.saveWorkerData()
+            await PerformanceTester.measureWrapper(PERFORMANCE_SDK_EVENTS.AUTOMATE_EVENTS.SESSION_STATUS, async () => {
+                if (setSessionStatus && !BrowserstackCLI.getInstance().isRunning()) {
+                    const ignoreHooksStatus = this._options.testObservabilityOptions?.ignoreHooksStatus === true
+                    let sessionStatus: string
+                    let failureReason: string | undefined
 
-        await PerformanceTester.stopAndGenerate('performance-service.html')
-        if (process.env[PERF_MEASUREMENT_ENV]) {
-            PerformanceTester.calculateTimes([
-                'onRunnerStart', 'onSuiteStart', 'onSuiteEnd',
-                'onTestStart', 'onTestEnd', 'onTestSkip', 'before',
-                'beforeHook', 'afterHook', 'beforeTest', 'afterTest',
-                'uploadPending', 'teardown', 'browserCommand'
-            ])
+                    if (result === 0 && this._specsRan) {
+                    // Test runner reported success and tests ran
+                        if (ignoreHooksStatus) {
+                        // Only consider pure test failures, ignore hook failures
+                            const hasPureTestFailures = this._pureTestFailReasons.length > 0
+                            sessionStatus = hasPureTestFailures ? 'failed' : 'passed'
+                            failureReason = hasPureTestFailures ? this._pureTestFailReasons.join('\n') : undefined
+                        } else {
+                        // Default behavior: consider all failures including hooks
+                            const hasReasons = this._failReasons.length > 0
+                            sessionStatus = hasReasons ? 'failed' : 'passed'
+                            failureReason = hasReasons ? this._failReasons.join('\n') : undefined
+                        }
+                    } else if (ignoreHooksStatus && this._specsRan) {
+                    // Test runner reported failure but ignoreHooksStatus is enabled
+                    // Check if we only have hook failures and no pure test failures
+                        const hasPureTestFailures = this._pureTestFailReasons.length > 0
+                        const hasOnlyHookFailures = this._failReasons.length === 0 && this._hookFailReasons.length > 0
+
+                        if (hasOnlyHookFailures && !hasPureTestFailures) {
+                        // Only hook failures exist - mark as passed when ignoreHooksStatus is true
+                            sessionStatus = 'passed'
+                            failureReason = undefined
+                        } else {
+                        // Pure test failures exist - mark as failed
+                            sessionStatus = 'failed'
+                            failureReason = hasPureTestFailures ? this._pureTestFailReasons.join('\n') : undefined
+                        }
+                    } else {
+                    // Default behavior: mark as failed (test runner reported failure or no tests ran)
+                        sessionStatus = 'failed'
+                        if (ignoreHooksStatus && this._pureTestFailReasons.length > 0) {
+                            failureReason = this._pureTestFailReasons.join('\n')
+                        } else if (this._failReasons.length > 0) {
+                            failureReason = this._failReasons.join('\n')
+                        } else {
+                            failureReason = undefined
+                        }
+                    }
+
+                    BStackLogger.debug(`Setting session status to ${sessionStatus} for sessionId ${this._browser?.sessionId}, failure reason: ${failureReason}`)
+
+                    await this._updateJob({
+                        status: sessionStatus,
+                        ...(setSessionName ? { name: this._fullTitle } : {}),
+                        ...(failureReason ? { reason: failureReason } : {})
+                    })
+                }
+            })()
+
+            await Listener.getInstance().onWorkerEnd()
+            if (!BrowserstackCLI.getInstance().isRunning()) {
+                await this._percyHandler?.teardown()
+            }
+            this.saveWorkerData()
+
+            PerformanceTester.end(PERFORMANCE_SDK_EVENTS.HOOK_EVENTS.AFTER)
+            await PerformanceTester.stopAndGenerate('performance-service.html')
+            if (process.env[PERF_MEASUREMENT_ENV]) {
+                PerformanceTester.calculateTimes([
+                    'onRunnerStart', 'onSuiteStart', 'onSuiteEnd',
+                    'onTestStart', 'onTestEnd', 'onTestSkip', 'before',
+                    'beforeHook', 'afterHook', 'beforeTest', 'afterTest',
+                    'uploadPending', 'teardown', 'browserCommand'
+                ])
+            }
+            // Override process exit when we have only hook failures and ignoreHooksStatus is true
+            const ignoreHooksStatus = this._options.testObservabilityOptions?.ignoreHooksStatus === true
+            const hasOnlyHookFailures = this._failReasons.length === 0 && this._hookFailReasons.length > 0
+            const shouldOverrideResult = ignoreHooksStatus && this._specsRan && hasOnlyHookFailures
+
+            if (shouldOverrideResult && result !== 0) {
+                return
+            }
+
+        } catch (error) {
+            BStackLogger.error(`Error in after hook: ${error}`)
+            PerformanceTester.end(PERFORMANCE_SDK_EVENTS.HOOK_EVENTS.AFTER, false, util.format(error))
+            await PerformanceTester.stopAndGenerate('performance-service.html')
         }
+
     }
 
     /**
@@ -437,7 +524,22 @@ export default class BrowserstackService implements Services.ServiceInstance {
                 )
             )
 
-            this._failReasons.push(exception)
+            // For Cucumber with ignoreHooksStatus, check if failure is due to test steps or hooks
+            const ignoreHooksStatus = this._options.testObservabilityOptions?.ignoreHooksStatus === true
+            if (ignoreHooksStatus && this._insightsHandler) {
+                // Check if any test steps failed (excluding hook failures)
+                const hasTestStepFailures = this._insightsHandler.hasTestStepFailures(world)
+                if (hasTestStepFailures) {
+                    // Test steps failed - this is a pure test failure, add to both arrays
+                    this._failReasons.push(exception)
+                    this._pureTestFailReasons.push(exception)
+                }
+                // If no test steps failed, this is likely a hook-only failure - don't add to main failure arrays
+            } else {
+                // Default behavior: treat all scenario failures as test failures
+                this._failReasons.push(exception)
+                this._pureTestFailReasons.push(exception)
+            }
         }
 
         await this._accessibilityHandler?.afterScenario(world)
@@ -465,22 +567,36 @@ export default class BrowserstackService implements Services.ServiceInstance {
         }
 
         const { setSessionName, setSessionStatus } = this._options
-        const hasReasons = this._failReasons.length > 0
-        const status = hasReasons ? 'failed' : 'passed'
+        const ignoreHooksStatus = this._options.testObservabilityOptions?.ignoreHooksStatus === true
+
+        let sessionStatus: string
+        let failureReason: string | undefined
+
+        if (ignoreHooksStatus) {
+            // Only consider pure test failures, ignore hook failures
+            const hasPureTestFailures = this._pureTestFailReasons.length > 0
+            sessionStatus = hasPureTestFailures ? 'failed' : 'passed'
+            failureReason = hasPureTestFailures ? this._pureTestFailReasons.join('\n') : undefined
+        } else {
+            // Default behavior: consider all failures including hooks
+            const hasReasons = this._failReasons.length > 0
+            sessionStatus = hasReasons ? 'failed' : 'passed'
+            failureReason = hasReasons ? this._failReasons.join('\n') : undefined
+        }
 
         if (!this._browser.isMultiremote) {
-            BStackLogger.info(`Update (reloaded) job with sessionId ${oldSessionId}, ${status}`)
+            BStackLogger.info(`Update (reloaded) job with sessionId ${oldSessionId}, ${sessionStatus}`)
         } else {
             const browserName = (this._browser as any as WebdriverIO.MultiRemoteBrowser).instances.filter(
                 (browserName: string) => this._browser && (this._browser as any as WebdriverIO.MultiRemoteBrowser).getInstance(browserName).sessionId === newSessionId)[0]
-            BStackLogger.info(`Update (reloaded) multiremote job for browser "${browserName}" and sessionId ${oldSessionId}, ${status}`)
+            BStackLogger.info(`Update (reloaded) multiremote job for browser "${browserName}" and sessionId ${oldSessionId}, ${sessionStatus}`)
         }
 
         if (setSessionStatus) {
             await this._update(oldSessionId, {
-                status,
+                status: sessionStatus,
                 ...(setSessionName ? { name: this._fullTitle } : {}),
-                ...(hasReasons ? { reason: this._failReasons.join('\n') } : {})
+                ...(failureReason ? { reason: failureReason } : {})
             })
         }
 
@@ -491,6 +607,8 @@ export default class BrowserstackService implements Services.ServiceInstance {
         delete this._fullTitle
         delete this._suiteFile
         this._failReasons = []
+        this._hookFailReasons = []
+        this._pureTestFailReasons = []
         await this._printSessionURL()
     }
     _isAppAutomate(): boolean {

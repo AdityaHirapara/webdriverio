@@ -9,7 +9,7 @@ import { TestFrameworkConstants } from '../frameworks/constants/testFrameworkCon
 import { GrpcClient } from '../grpcClient.js'
 import type TestFrameworkInstance from '../instances/testFrameworkInstance.js'
 // eslint-disable-next-line camelcase
-import type { LogCreatedEventRequest, LogCreatedEventRequest_LogEntry, TestFrameworkEventRequest, TestSessionEventRequest, TestSessionEventRequest_AutomationSession } from '../../proto/sdk-messages.js'
+import type { LogCreatedEventRequest, LogCreatedEventRequest_LogEntry, TestFrameworkEventRequest, TestSessionEventRequest, AutomationSession } from '@browserstack/wdio-browserstack-service'
 import type { Frameworks } from '@wdio/types'
 import WdioMochaTestFramework from '../frameworks/wdioMochaTestFramework.js'
 import type AutomationFrameworkInstance from '../instances/automationFrameworkInstance.js'
@@ -34,7 +34,7 @@ export default class TestHubModule extends BaseModule {
         this.name = 'TestHubModule'
         this.testhubConfig = testhubConfig
 
-        TestFramework.registerObserver(TestFrameworkState.TEST, HookState.POST, this.onAfterTest.bind(this))
+        TestFramework.registerObserver(TestFrameworkState.TEST, HookState.PRE, this.onBeforeTest.bind(this))
 
         Object.values(TestFrameworkState).forEach(state => {
             Object.values(HookState).forEach(hook => {
@@ -51,10 +51,9 @@ export default class TestHubModule extends BaseModule {
         return TestHubModule.MODULE_NAME
     }
 
-    onAfterTest(args: Record<string, unknown>) {
-        this.logger.debug('onAfterTest: Called after test hook from cli configured module!!!')
+    onBeforeTest(args: Record<string, unknown>) {
+        this.logger.debug('onBeforeTest: Called after test hook from cli configured module!!!')
         const autoInstace = AutomationFramework.getTrackedInstance() as AutomationFrameworkInstance
-        this.logger.info(`onAfterTest: Automation instance: ${JSON.stringify(Object.fromEntries(autoInstace.getAllData()))}`)
         const instances = [autoInstace]
         args.autoInstance = instances
         this.sendTestSessionEvent(args)
@@ -116,7 +115,7 @@ export default class TestHubModule extends BaseModule {
             const uuid =  TestFramework.getState(instance, TestFrameworkConstants.KEY_TEST_UUID) || instance.getRef()
             const eventJson = Buffer.from(JSON.stringify(Object.fromEntries(testData)))
             const executionContext = { hash: trackedContext.getId(), threadId: trackedContext.getThreadId().toString(), processId: trackedContext.getProcessId().toString() }
-            const payload: TestFrameworkEventRequest = {
+            const payload: Omit<TestFrameworkEventRequest, 'binSessionId'> = {
                 platformIndex,
                 testFrameworkName,
                 testFrameworkVersion,
@@ -126,8 +125,7 @@ export default class TestHubModule extends BaseModule {
                 endedAt,
                 uuid,
                 eventJson,
-                executionContext,
-                binSessionId: '' // TODO: Dummy value, not needed
+                executionContext
             }
             this.logger.debug(`sendTestFrameworkEvent payload: ${JSON.stringify(payload)}`)
             await GrpcClient.getInstance().testFrameworkEvent(payload)
@@ -146,12 +144,6 @@ export default class TestHubModule extends BaseModule {
         try {
             const instance = args.instance as TestFrameworkInstance
             const autoInstances = (args.autoInstance as AutomationFrameworkInstance[]) || []
-            // const cbtSessionCreated = TestFramework.getState(instance, WebdriverModule.KEY_CBT_SESSION_CREATED, false) as boolean
-
-            // if (cbtSessionCreated) {
-            //     return
-            // }
-
             const trackedContext = instance.getContext()
             const testFWName = TestFramework.getState(instance, TestFrameworkConstants.KEY_TEST_FRAMEWORK_NAME) as string
             const testFWVersion = TestFramework.getState(instance, TestFrameworkConstants.KEY_TEST_FRAMEWORK_VERSION) as string
@@ -164,8 +156,7 @@ export default class TestHubModule extends BaseModule {
                 processId: trackedContext.getProcessId().toString()
             }
 
-            const payload: TestSessionEventRequest = {
-                binSessionId: '',
+            const payload: Omit<TestSessionEventRequest, 'binSessionId'> = {
                 testFrameworkName: testFWName,
                 testFrameworkVersion: testFWVersion,
                 testFrameworkState: testState.toString(),
@@ -198,7 +189,7 @@ export default class TestHubModule extends BaseModule {
                     : 'unknown_grid'
 
                 // eslint-disable-next-line camelcase
-                const automationSession: TestSessionEventRequest_AutomationSession = {
+                const automationSession: AutomationSession = {
                     provider: sessionProvider,
                     ref: autoInstance.getRef(),
                     hubUrl: this.config.hubUrl as string,
@@ -218,7 +209,6 @@ export default class TestHubModule extends BaseModule {
             this.logger.debug(`sendTestSessionEvent payload: ${JSON.stringify(payload)}`)
             await GrpcClient.getInstance().testSessionEvent(payload)
             this.logger.debug(`sendTestSessionEvent complete for testState: ${testState} hookState: ${hookState}`)
-            // TestFramework.setState(instance, WebdriverModule.KEY_CBT_SESSION_CREATED, response.success)
         } catch (error) {
             this.logger.error(`sendTestSessionEvent: Error sending grpc call: event=${JSON.stringify(args)}, error=${error}`)
             throw new Error(`Failed to send test session event: ${error}`)
@@ -240,11 +230,10 @@ export default class TestHubModule extends BaseModule {
             this.logger.debug(`sendLogCreatedEvent testId: testFrameworkState: ${testFrameworkState} testHookState: ${testHookState}`)
             const platformIndex = process.env.WDIO_WORKER_ID ? parseInt(process.env.WDIO_WORKER_ID.split('-')[0]) : 0
             const executionContext = { hash: trackedContext.getId(), threadId: trackedContext.getThreadId().toString(), processId: trackedContext.getProcessId().toString() }
-            const payload: LogCreatedEventRequest = {
+            const payload: Omit<LogCreatedEventRequest, 'binSessionId'> = {
                 platformIndex,
                 logs: [],
-                executionContext,
-                binSessionId: '' // TODO: Dummy value, not needed
+                executionContext
             }
             for (const logEntry of logEntries) {
                 // eslint-disable-next-line camelcase

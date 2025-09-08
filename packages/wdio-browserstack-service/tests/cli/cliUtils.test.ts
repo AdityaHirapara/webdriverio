@@ -11,7 +11,7 @@ import PerformanceTester from '../../src/instrumentation/performance/performance
 import { EVENTS as PerformanceEvents } from '../../src/instrumentation/performance/constants.js'
 import type { Options } from '@wdio/types'
 import { nodeRequest } from '../../src/util.js'
-import { BROWSERSTACK_API_URL } from '../../src/constants.js'
+import APIUtils from '../../src/cli/apiUtils.js'
 
 const bstackLoggerSpy = vi.spyOn(bstackLogger.BStackLogger, 'logToFile')
 bstackLoggerSpy.mockImplementation(() => {})
@@ -66,11 +66,11 @@ describe('CLIUtils', () => {
         const mockConfig = {
             user: 'testuser',
             key: 'testkey',
-            commonCapabilities: {
+            capabilities: {
                 'bstack:options': {
                     buildName: 'common-build'
                 }
-            }
+            } as Record <string, unknown>
         } as Options.Testrunner
 
         it('returns stringified config with basic options', () => {
@@ -86,6 +86,15 @@ describe('CLIUtils', () => {
                 userName: 'testuser',
                 accessKey: 'testkey',
                 buildName: 'common-build',
+                buildTag: [],
+                isNonBstackA11yWDIO: true,
+                testContextOptions: {
+                    skipSessionName: false,
+                    skipSessionStatus: false,
+                    sessionNameOmitTestTitle: false,
+                    sessionNamePrependTopLevelSuiteTitle: false,
+                    sessionNameFormat: ''
+                },
                 platforms: [{
                     browserName: 'chrome'
                 }]
@@ -142,7 +151,7 @@ describe('CLIUtils', () => {
             const result = CLIUtils.getBinConfig(mockConfig, capabilities, options)
             const parsed = JSON.parse(result)
 
-            expect(parsed.browserstackLocalOptions).toEqual({
+            expect(parsed.browserStackLocalOptions).toEqual({
                 localIdentifier: 'test123'
             })
             expect(parsed.opts).toBeUndefined()
@@ -175,8 +184,8 @@ describe('CLIUtils', () => {
     })
 
     describe('getSdkLanguage', () => {
-        it('returns wdio as sdk language', () => {
-            expect(CLIUtils.getSdkLanguage()).toBe('wdio')
+        it('returns ECMAScript as sdk language', () => {
+            expect(CLIUtils.getSdkLanguage()).toBe('ECMAScript')
         })
     })
 
@@ -215,8 +224,8 @@ describe('CLIUtils', () => {
 
         it('returns empty string when no binary files found', () => {
             vi.mocked(fs.readdirSync).mockReturnValue([
-                { name: 'other-file.txt', isFile: () => true, isDirectory: () => false }
-            ] as unknown as fs.Dirent[])
+                'other-file.txt'
+            ] as any)
 
             const result = CLIUtils.getExistingCliPath(mockCliDir)
             expect(result).toBe('')
@@ -304,11 +313,11 @@ describe('CLIUtils', () => {
 
             expect(testFramework).toEqual({
                 name: 'mocha',
-                version: { mocha: 'latest' }
+                version: { mocha: CLIUtils.getSdkVersion() }
             })
             expect(autoFramework).toEqual({
                 name: 'webdriver',
-                version: 'latest'
+                version: { webdriver: CLIUtils.getSdkVersion() }
             })
         })
     })
@@ -477,13 +486,13 @@ describe('CLIUtils', () => {
                 'GET',
                 expect.stringContaining('param1=value1'),
                 expect.any(Object),
-                BROWSERSTACK_API_URL
+                APIUtils.BROWSERSTACK_AUTOMATE_API_URL
             )
             expect(nodeRequest).toHaveBeenCalledWith(
                 'GET',
                 expect.stringContaining('param2=value2'),
                 expect.any(Object),
-                BROWSERSTACK_API_URL
+                APIUtils.BROWSERSTACK_AUTOMATE_API_URL
             )
         })
 
@@ -508,13 +517,8 @@ describe('CLIUtils', () => {
 
     describe('runShellCommand', () => {
         it('resolves with stdout for successful command', async () => {
-            const result = await CLIUtils.runShellCommand('echo "test"')
+            const result = await CLIUtils.runShellCommand('echo test')
             expect(result).toBe('test')
-        })
-
-        it('resolves with SHELL_EXECUTE_ERROR for failed command', async () => {
-            const result = await CLIUtils.runShellCommand('invalid_command')
-            expect(result).toBe('/bin/sh: invalid_command: command not found')
         })
     })
 

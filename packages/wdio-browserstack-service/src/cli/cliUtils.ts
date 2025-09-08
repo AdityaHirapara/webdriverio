@@ -6,7 +6,7 @@ import util, { promisify } from 'node:util'
 import { exec } from 'node:child_process'
 import type { ZipFile, Options as yauzlOptions } from 'yauzl'
 import yauzl from 'yauzl'
-import { fetch } from 'undici'
+import got from 'got'
 import { threadId } from 'node:worker_threads'
 
 import { createRequire } from 'node:module'
@@ -24,20 +24,22 @@ import {
     getBrowserStackUser,
     getBrowserStackKey,
     isFalse,
+    isTurboScale,
+    shouldAddServiceVersion,
 } from '../util.js'
 import PerformanceTester from '../instrumentation/performance/performance-tester.js'
 import { EVENTS as PerformanceEvents } from '../instrumentation/performance/constants.js'
 import { BStackLogger as logger } from './cliLogger.js'
 import { UPDATED_CLI_ENDPOINT } from '../constants.js'
 import type { Options, Capabilities } from '@wdio/types'
-import { Readable } from 'node:stream'
-import type { BrowserstackConfig, BrowserstackOptions, TestObservabilityOptions } from 'src/types.js'
+import type { BrowserstackConfig, BrowserstackOptions, TestObservabilityOptions } from '../types.js'
 import { TestFrameworkConstants } from './frameworks/constants/testFrameworkConstants.js'
 import APIUtils from './apiUtils.js'
 
 export class CLIUtils {
     static automationFrameworkDetail = {}
     static testFrameworkDetail = {}
+    static CLISupportedFrameworks = ['mocha']
 
     static isDevelopmentEnv() {
         return process.env.BROWSERSTACK_CLI_ENV === 'development'
@@ -55,7 +57,7 @@ export class CLIUtils {
      * @returns {string}
      * @throws {Error}
      */
-    static getBinConfig(config: Options.Testrunner, capabilities: Capabilities.RemoteCapabilities, options: BrowserstackConfig & BrowserstackOptions) {
+    static getBinConfig(config: Options.Testrunner, capabilities: Capabilities.RemoteCapabilities, options: BrowserstackConfig & BrowserstackOptions, buildTag?: string) {
         const modifiedOpts: Record<string, unknown> = { ...options }
         if (modifiedOpts.opts) {
             modifiedOpts.browserStackLocalOptions = modifiedOpts.opts
@@ -70,21 +72,34 @@ export class CLIUtils {
             sessionNameFormat: modifiedOpts.sessionNameFormat || ''
         }
 
-        const commonBstackOptions = (config.commonCapabilities &&
-            config.commonCapabilities['bstack:options']) || {}
+        const commonBstackOptions = (() => {
+            const caps = config.capabilities as unknown
+            if (
+                caps &&
+                !Array.isArray(caps) &&
+                typeof caps === 'object' &&
+                'bstack:options' in (caps as Record<string, unknown>)
+            ) {
+                // Cast after guard to satisfy TypeScript
+                return (caps as { ['bstack:options']?: Record<string, unknown> })['bstack:options'] || {}
+            }
+            return {}
+        })()
 
+        const isNonBstackA11y = isTurboScale(options) || !shouldAddServiceVersion(config as Options.Testrunner, options.testObservability)
         const observabilityOptions: TestObservabilityOptions = options.testObservabilityOptions || {}
         const binconfig: Record<string, unknown> = {
             userName: observabilityOptions.user || config.user,
             accessKey: observabilityOptions.key || config.key,
             platforms: [],
+            isNonBstackA11yWDIO: isNonBstackA11y,
             ...modifiedOpts,
             ...commonBstackOptions,
         }
 
         binconfig.buildName = observabilityOptions.buildName || binconfig.buildName
         binconfig.projectName = observabilityOptions.projectName || binconfig.projectName
-        binconfig.buildTag = observabilityOptions.buildTag || []
+        binconfig.buildTag = this.getObservabilityBuildTags(observabilityOptions, buildTag) || []
 
         let caps = capabilities
         if (capabilities && !Array.isArray(capabilities)) {
@@ -320,30 +335,27 @@ export class CLIUtils {
             const zipFilePath = path.join(cliDir, 'downloaded_file.zip')
             const downloadedFileStream = fs.createWriteStream(zipFilePath)
             return new Promise<string|null>((resolve, reject) => {
-                fetch(binDownloadUrl, {
-                    redirect: 'follow'
-                }).then((response) => {
-                    if (response.ok && response.body) {
-                        const binaryName = null
-                        Readable.fromWeb(response.body).pipe(downloadedFileStream)
+                const binaryName = null
 
-                        downloadedFileStream.on('error', function (err: Error) {
-                            logger.error('Got Error while downloading percy binary file' + err)
-                            PerformanceTester.end(PerformanceEvents.SDK_CLI_DOWNLOAD, false, util.format(err))
-                            reject(err)
-                        })
-                        CLIUtils.downloadFileStream(downloadedFileStream, binaryName, zipFilePath, cliDir, resolve, reject)
-                    } else {
-                        const err = 'Got Error in cli binary download response' + response.status
-                        logger.error(err)
-                        PerformanceTester.end(PerformanceEvents.SDK_CLI_DOWNLOAD, false, err)
-                        reject(err)
-                    }
-                }).catch((err) => {
+                const stream = got.stream(binDownloadUrl, {
+                    followRedirect: true
+                })
+
+                stream.pipe(downloadedFileStream)
+
+                downloadedFileStream.on('error', function (err: Error) {
+                    logger.error('Got Error while downloading percy binary file' + err)
+                    PerformanceTester.end(PerformanceEvents.SDK_CLI_DOWNLOAD, false, util.format(err))
+                    reject(err)
+                })
+
+                stream.on('error', (err) => {
                     logger.error(`Got Error in cli binary downloading request ${util.format(err)}`)
                     PerformanceTester.end(PerformanceEvents.SDK_CLI_DOWNLOAD, false, util.format(err))
                     reject(err)
                 })
+
+                CLIUtils.downloadFileStream(downloadedFileStream, binaryName, zipFilePath, cliDir, resolve, reject)
                 PerformanceTester.end(PerformanceEvents.SDK_CLI_DOWNLOAD)
             })
         } catch (err) {
@@ -469,4 +481,25 @@ export class CLIUtils {
 
         return pattern.test(hookState)
     }
+
+    static getObservabilityBuildTags(observabilityOptions: TestObservabilityOptions, bstackBuildTag?: string) {
+        if (process.env.TEST_OBSERVABILITY_BUILD_TAG) {
+            return process.env.TEST_OBSERVABILITY_BUILD_TAG.split(',')
+        }
+        if (observabilityOptions.buildTag) {
+            return observabilityOptions.buildTag
+        }
+        if (bstackBuildTag) {
+            return [bstackBuildTag]
+        }
+        return []
+    }
+
+    static checkCLISupportedFrameworks(framework: string | undefined) {
+        if (framework === undefined) {
+            return false
+        }
+        return this.CLISupportedFrameworks.includes(framework)
+    }
+
 }
