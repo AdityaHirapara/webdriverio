@@ -23,6 +23,7 @@ import {
     nodeRequest,
     getBrowserStackUser,
     getBrowserStackKey,
+    isFalse,
 } from '../util.js'
 import PerformanceTester from '../instrumentation/performance/performance-tester.js'
 import { EVENTS as PerformanceEvents } from '../instrumentation/performance/constants.js'
@@ -56,8 +57,16 @@ export class CLIUtils {
     static getBinConfig(config: Options.Testrunner, capabilities: Capabilities.RemoteCapabilities, options: BrowserstackConfig & BrowserstackOptions) {
         const modifiedOpts: Record<string, unknown> = { ...options }
         if (modifiedOpts.opts) {
-            modifiedOpts.browserstackLocalOptions = modifiedOpts.opts
+            modifiedOpts.browserStackLocalOptions = modifiedOpts.opts
             delete modifiedOpts.opts
+        }
+
+        modifiedOpts.testContextOptions = {
+            skipSessionName: isFalse(modifiedOpts.setSessionName),
+            skipSessionStatus: isFalse(modifiedOpts.setSessionStatus),
+            sessionNameOmitTestTitle: modifiedOpts.sessionNameOmitTestTitle || false,
+            sessionNamePrependTopLevelSuiteTitle: modifiedOpts.sessionNamePrependTopLevelSuiteTitle || false,
+            sessionNameFormat: modifiedOpts.sessionNameFormat || ''
         }
 
         const commonBstackOptions = (config.commonCapabilities &&
